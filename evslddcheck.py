@@ -15,7 +15,7 @@ logging.basicConfig(level=logging.INFO)
 os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "/root/.cache/ms-playwright"
 
 BOT_TOKEN = "8607321079:AAEUoyb8XM6ASlvk7FafGYyegOQkRKJ-loc"
-LOG_CHAT_ID = -4943000725
+LOG_CHAT_ID = -1003842299691
 ADMIN_IDS = [7636751730, 7181364375]
 
 SITE_URL = "https://tm-control.cc"
