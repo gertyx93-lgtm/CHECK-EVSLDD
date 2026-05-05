@@ -37,7 +37,7 @@ def ensure_playwright_browsers():
 ensure_playwright_browsers()
 
 # ───────── НАСТРОЙКИ ─────────
-BOT_TOKEN = "8607321079:AAEUoyb8XM6ASlvk7FafGYyegOQkRKJ-loc"
+BOT_TOKEN = "8675353888:AAGVSKQGQqSNkRLE_nC1OtLpJDklyDcyAkU"
 LOG_CHAT_ID = -1003842299691
 ADMIN_IDS = [7636751730, 7181364375]
 
