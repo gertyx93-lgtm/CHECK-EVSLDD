@@ -3,3 +3,8 @@ aiohttp==3.9.5
 playwright==1.44.0
 greenlet==3.0.3
 pydantic==2.7.4
+pyee==11.1.0
+magic-filter>=0.0.21
+aiofiles>=23.1.0
+certifi>=2024.2.2
+typing-extensions>=4.6.0
