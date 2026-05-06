@@ -368,32 +368,17 @@ async def send_with_photo(
 
     else:
         # Текстовое сообщение — редактируем текст
-        # Если есть фото, пробуем отправить новое (первый раз для этого чата)
-        if new_photo:
-            try:
-                # Редактируем текст и добавляем фото через edit не получится для текстового сообщения,
-                # поэтому используем edit_text и оставляем без фото, либо отправляем новое
-                # Правильный подход: edit_text (фото не добавить к текстовому через edit)
-                return await target.edit_text(
-                    text=text,
-                    reply_markup=reply_markup,
-                    parse_mode="HTML"
-                )
-            except Exception as e:
-                logging.warning(f"edit_text не сработал: {e}")
-                return target
-        else:
-            try:
-                return await target.edit_text(
-                    text=text,
-                    reply_markup=reply_markup,
-                    parse_mode="HTML"
-                )
-            except Exception as e:
-                logging.warning(f"edit_text не сработал: {e}")
-                return target
+        try:
+            return await target.edit_text(
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logging.warning(f"edit_text не сработал: {e}")
+            return target
 
-# ───────── ОТПРАВКА ПЕРВОГО СООБЩЕНИЯ (только при /start или при первом ответе на текст пользователя) ─────────
+# ───────── ОТПРАВКА ПЕРВОГО СООБЩЕНИЯ ─────────
 async def send_new_with_photo(
     target,
     text: str,
@@ -467,8 +452,6 @@ async def get_context():
                 "--disable-setuid-sandbox",
                 "--disable-extensions",
                 "--disable-gpu",
-                "--disable-images",
-                "--blink-settings=imagesEnabled=false",
             ]
         )
         _context = await _browser.new_context(
@@ -481,14 +464,6 @@ async def get_context():
             java_script_enabled=True,
         )
         await _context.grant_permissions(["clipboard-read", "clipboard-write"])
-        await _context.route(
-            "**/*.{png,jpg,jpeg,gif,svg,woff,woff2,ttf,eot,ico}",
-            lambda route: route.abort()
-        )
-        await _context.route(
-            "**/analytics*",
-            lambda route: route.abort()
-        )
     return _context
 
 async def reset_browser():
@@ -511,29 +486,50 @@ async def site_login(page):
     await page.fill("input[name='password']", SITE_PASSWORD)
     await page.click("button[type='submit']")
     await page.wait_for_url(f"{SITE_URL}/**", timeout=20000)
-    await page.wait_for_timeout(1000)
+    await page.wait_for_timeout(2000)
     logging.info(f"Залогинился. URL: {page.url}")
 
 async def ensure_logged_in(page):
-    await page.goto(f"{SITE_URL}/domains", timeout=30000, wait_until="networkidle")
-    await page.wait_for_timeout(2000)  # Дать время на рендер React компонентов
+    """Проверяет авторизацию и дожидается загрузки страницы"""
+    await page.goto(f"{SITE_URL}/domains", timeout=40000, wait_until="networkidle")
+    await page.wait_for_timeout(4000)  # Увеличено время для загрузки React
+    
     if "/auth/login" in page.url or "/login" in page.url:
         logging.info("Сессия истекла, логинюсь заново...")
         await site_login(page)
-        await page.goto(f"{SITE_URL}/domains", timeout=20000, wait_until="domcontentloaded")
-        await page.wait_for_timeout(1000)
+        await page.goto(f"{SITE_URL}/domains", timeout=40000, wait_until="networkidle")
+        await page.wait_for_timeout(4000)
+    
     logging.info(f"ensure_logged_in: {page.url}")
+    
+    # Дополнительная проверка что страница действительно загрузилась
+    try:
+        await page.wait_for_load_state("domcontentloaded", timeout=5000)
+        await page.wait_for_load_state("networkidle", timeout=10000)
+    except Exception as e:
+        logging.warning(f"Ожидание загрузки страницы: {e}")
 
 async def _open_invoice_form(page, domain_name: str = None) -> bool:
     logging.info(f"_open_invoice_form: URL={page.url}, domain={domain_name}")
+    
+    # Увеличенное время ожидания для хостинга
     try:
-        await page.wait_for_selector('[data-slot="dropdown-menu-trigger"]', timeout=10000)
+        await page.wait_for_selector('[data-slot="dropdown-menu-trigger"]', timeout=20000)
+        logging.info("Кнопки меню найдены")
     except Exception as e:
         logging.error(f"Кнопки меню не появились: {e}")
+        # Сохраняем скриншот для диагностики
+        try:
+            await page.screenshot(path="debug_no_menu.png")
+            logging.info("Скриншот сохранён: debug_no_menu.png")
+        except Exception:
+            pass
         return False
-    await page.wait_for_timeout(300)
+    
+    await page.wait_for_timeout(500)
     triggers = await page.query_selector_all('[data-slot="dropdown-menu-trigger"]')
     logging.info(f"Всего триггеров: {len(triggers)}")
+    
     SKIP_KEYWORDS = ["ID:", SITE_LOGIN, "horunochka", "Open user menu", "avatar"]
 
     async def is_profile_trigger(t) -> bool:
@@ -549,9 +545,9 @@ async def _open_invoice_form(page, domain_name: str = None) -> bool:
         if not await t.is_visible():
             return None
         await t.click()
-        await page.wait_for_timeout(400)
+        await page.wait_for_timeout(600)
         try:
-            await page.wait_for_selector('div[role="menu"][data-state="open"]', timeout=2000)
+            await page.wait_for_selector('div[role="menu"][data-state="open"]', timeout=3000)
         except Exception:
             return None
         texts = await page.evaluate("""
@@ -585,6 +581,7 @@ async def _open_invoice_form(page, domain_name: str = None) -> bool:
         logging.error("Invoice не найден ни в одном меню")
         try:
             await page.screenshot(path="debug_no_invoice.png")
+            logging.info("Скриншот сохранён: debug_no_invoice.png")
         except Exception:
             pass
         return False
@@ -607,17 +604,18 @@ async def _open_invoice_form(page, domain_name: str = None) -> bool:
 
     logging.info("Invoice кликнут")
     try:
-        await page.wait_for_selector("[data-slot='drawer-content'][data-state='open']", timeout=7000)
+        await page.wait_for_selector("[data-slot='drawer-content'][data-state='open']", timeout=10000)
         logging.info("Drawer открылся")
     except Exception as e:
         logging.error(f"Drawer не открылся: {e}")
         try:
             await page.screenshot(path="debug_drawer.png")
+            logging.info("Скриншот сохранён: debug_drawer.png")
         except Exception:
             pass
         return False
 
-    await page.wait_for_timeout(300)
+    await page.wait_for_timeout(500)
     return True
 
 async def _fill_and_submit_invoice(page, amount: str, tx_id: str, title: str) -> bool:
@@ -1426,10 +1424,10 @@ async def handle_admin_add(message: Message, state: FSMContext):
 
     new_id = int(message.text.strip())
     data   = load_data()
+    state_data = await state.get_data()
     await state.clear()
 
     if new_id in data["allowed"]:
-        state_data = await state.get_data()
         bot_msg_id = state_data.get("bot_msg_id")
         bot_msg_chat_id = state_data.get("bot_msg_chat_id")
         if bot_msg_id and bot_msg_chat_id:
@@ -1454,7 +1452,6 @@ async def handle_admin_add(message: Message, state: FSMContext):
         user["tag"] = default_tag
     save_data(data)
 
-    state_data = await state.get_data()
     bot_msg_id = state_data.get("bot_msg_id")
     bot_msg_chat_id = state_data.get("bot_msg_chat_id")
     if bot_msg_id and bot_msg_chat_id:
