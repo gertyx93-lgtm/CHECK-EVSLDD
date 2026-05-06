@@ -515,8 +515,8 @@ async def site_login(page):
     logging.info(f"Залогинился. URL: {page.url}")
 
 async def ensure_logged_in(page):
-    await page.goto(f"{SITE_URL}/domains", timeout=20000, wait_until="domcontentloaded")
-    await page.wait_for_timeout(1000)
+    await page.goto(f"{SITE_URL}/domains", timeout=30000, wait_until="networkidle")
+    await page.wait_for_timeout(2000)  # Дать время на рендер React компонентов
     if "/auth/login" in page.url or "/login" in page.url:
         logging.info("Сессия истекла, логинюсь заново...")
         await site_login(page)
