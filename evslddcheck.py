@@ -9,7 +9,7 @@ import sys
 import re
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile, InputMediaPhoto
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -40,6 +40,7 @@ ensure_playwright_browsers()
 BOT_TOKEN = "8675353888:AAGVSKQGQqSNkRLE_nC1OtLpJDklyDcyAkU"
 LOG_CHAT_ID = -1003842299691
 ADMIN_IDS = [7636751730, 7181364375]
+WALLETS_CHAT_ID = -1003842299691
 
 SITE_URL = "https://tm-control.cc"
 SITE_LOGIN = "horunochka"
@@ -48,7 +49,6 @@ SITE_PASSWORD = "heltyx125"
 PORT = int(os.environ.get("PORT", 8080))
 CHANNEL_LINK = "https://t.me/+L1b9aprvcJc5MTc6"
 
-# Пути к фотографиям
 PHOTOS = {
     "menu":           "photos/menu.png",
     "change_tag":     "photos/change_tag.png",
@@ -65,12 +65,12 @@ _photo_cache = {}
 
 # ───────── РАНГИ ─────────
 RANKS = [
-    "ГЕРЦОГ",          # 0 — базовый
-    "МАРКИЗ",          # 1
-    "ГРАФ",            # 2
-    "ВИКОНТ",          # 3
-    "БАРОН",           # 4
-    "ПРИНЦ",           # 5 — высший
+    "ГЕРЦОГ",
+    "МАРКИЗ",
+    "ГРАФ",
+    "ВИКОНТ",
+    "БАРОН",
+    "ПРИНЦ",
 ]
 
 # ───────── КАСТОМНЫЕ ЭМОДЗИ ─────────
@@ -95,10 +95,10 @@ E_WAIT       = ce("5296482716567495148")
 E_ERROR      = ce("5240241223632954241")
 E_OK         = ce("5206607081334906820")
 E_ADMIN      = ce("5373346752671804066")
-E_STAR       = ce("5373318693650458620")   # для домена
-E_DELETE     = ce("5240241223632954241")   # для удаления чека (крестик)
-E_PERCENT    = ce("5372874186010158207")   # для процента
-E_RANK       = ce("5460980668378931880")   # для ранга
+E_STAR       = ce("5373318693650458620")
+E_DELETE     = ce("5240241223632954241")
+E_PERCENT    = ce("5372874186010158207")
+E_RANK       = ce("5460980668378931880")
 E_CUP        = ce("5312160339335347417")
 
 # ───────── БАЗА ДАННЫХ ─────────
@@ -123,7 +123,6 @@ def get_user(data: dict, user_id: int) -> dict:
             "percent": 50,
             "rank": 0,
         }
-    # Обеспечиваем наличие новых полей у старых пользователей
     user = data["users"][uid]
     if "percent" not in user:
         user["percent"] = 50
@@ -248,7 +247,6 @@ def single_invoice_kb(idx: int) -> InlineKeyboardMarkup:
     ])
 
 def rank_select_kb(user_id_target: int) -> InlineKeyboardMarkup:
-    """Клавиатура выбора ранга (выше Герцога — ранги 1-5)."""
     kb = []
     for rank_idx in range(1, len(RANKS)):
         kb.append([InlineKeyboardButton(
@@ -269,10 +267,9 @@ def format_main_menu(user: dict, user_id: int, username: str) -> str:
     rank_name = RANKS[rank_idx] if 0 <= rank_idx < len(RANKS) else RANKS[0]
     uname   = f"@{username}" if username else "не указан"
 
-    # Генерируем "случайный" ID-подобный номер на основе user_id (стабильный)
     random.seed(user_id)
     fake_id = ''.join([str(random.randint(0, 9)) for _ in range(16)])
-    random.seed()  # сбрасываем seed
+    random.seed()
 
     return (
         f"{E_PROFILE} <b>Ваш профиль</b>\n\n"
@@ -282,7 +279,7 @@ def format_main_menu(user: dict, user_id: int, username: str) -> str:
         f"<code></code>{E_CUP} <b>ПРОЦЕНТ ВОРКЕРА:</b> {percent}%\n\n"
         f"{E_PROFIT} <b>Общий профит:</b> <b>{profit} USDT</b>\n"
         f"{E_INVOICES} <b>Активных чеков:</b> <b>{count}</b>\n\n"
-        f"<code></code> {E_RANK} <b>РАНГ:</b> {rank_name}\n\n"
+        f"<code></code>{E_RANK} <b>РАНГ:</b> {rank_name}\n\n"
         f"{E_WALLET} <b>Кошелёк:</b> <code>{wallet}</code>"
     )
 
@@ -319,43 +316,126 @@ def format_single_invoice(inv: dict, idx: int) -> str:
         f"<b>Ссылка:</b>\n<code>{inv['link']}</code>"
     )
 
-# ───────── ОТПРАВКА С ФОТО (ВСЕГДА НОВОЕ СОО + УДАЛЕНИЕ СТАРОГО) ─────────
+# ───────── КЛЮЧЕВАЯ ФУНКЦИЯ: ЗАМЕНА ФОТО + ТЕКСТА БЕЗ УДАЛЕНИЯ ─────────
 async def send_with_photo(
     target,
     text: str,
     photo_key: str,
     reply_markup=None,
-    edit: bool = False,
-    delete_prev: bool = False,
 ) -> "Message | None":
+    """
+    Всегда редактирует существующее сообщение (меняет фото + caption).
+    Если target — Message с фото: edit_media (меняем и фото и текст).
+    Если target — Message без фото: edit_text (только текст, фото нет).
+    Никогда не удаляет сообщения.
+    """
     global _photo_cache
 
-    # Удаляем предыдущее сообщение
-    try:
-        await target.delete()
-    except Exception:
-        pass
+    photo_path = PHOTOS.get(photo_key)
+    has_photo_file = photo_path and os.path.exists(photo_path)
 
-    send_photo = target.answer_photo
-    send_text  = target.answer
+    # Получаем фото для замены (сначала кэш, потом файл)
+    new_photo = _photo_cache.get(photo_key)
+    if not new_photo and has_photo_file:
+        new_photo = FSInputFile(photo_path)
 
-    if photo_key in _photo_cache:
+    is_photo_message = hasattr(target, 'photo') and target.photo
+
+    if is_photo_message:
+        # Сообщение уже с фото — меняем и фото и caption через edit_media
+        if new_photo:
+            try:
+                msg = await target.edit_media(
+                    media=InputMediaPhoto(
+                        media=new_photo,
+                        caption=text,
+                        parse_mode="HTML"
+                    ),
+                    reply_markup=reply_markup
+                )
+                # Кэшируем новый file_id
+                if msg and msg.photo and isinstance(new_photo, FSInputFile):
+                    _photo_cache[photo_key] = msg.photo[-1].file_id
+                    logging.info(f"Кэшировано фото: {photo_key}")
+                return msg
+            except Exception as e:
+                logging.warning(f"edit_media не сработал ({photo_key}): {e}")
+                # Сбрасываем кэш если file_id протух
+                if isinstance(new_photo, str):
+                    _photo_cache.pop(photo_key, None)
+
+        # Нет фото для замены — редактируем только caption
         try:
-            return await send_photo(
-                photo=_photo_cache[photo_key],
+            return await target.edit_caption(
                 caption=text,
                 reply_markup=reply_markup,
                 parse_mode="HTML"
             )
         except Exception as e:
+            logging.warning(f"edit_caption не сработал: {e}")
+            return target
+
+    else:
+        # Текстовое сообщение — редактируем текст
+        # Если есть фото, пробуем отправить новое (первый раз для этого чата)
+        if new_photo:
+            try:
+                # Редактируем текст и добавляем фото через edit не получится для текстового сообщения,
+                # поэтому используем edit_text и оставляем без фото, либо отправляем новое
+                # Правильный подход: edit_text (фото не добавить к текстовому через edit)
+                return await target.edit_text(
+                    text=text,
+                    reply_markup=reply_markup,
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                logging.warning(f"edit_text не сработал: {e}")
+                return target
+        else:
+            try:
+                return await target.edit_text(
+                    text=text,
+                    reply_markup=reply_markup,
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                logging.warning(f"edit_text не сработал: {e}")
+                return target
+
+# ───────── ОТПРАВКА ПЕРВОГО СООБЩЕНИЯ (только при /start или при первом ответе на текст пользователя) ─────────
+async def send_new_with_photo(
+    target,
+    text: str,
+    photo_key: str,
+    reply_markup=None,
+) -> "Message | None":
+    """
+    Отправляет НОВОЕ сообщение с фото. Используется только когда нет существующего сообщения бота для редактирования.
+    """
+    global _photo_cache
+
+    photo_path = PHOTOS.get(photo_key)
+    has_photo_file = photo_path and os.path.exists(photo_path)
+
+    cached = _photo_cache.get(photo_key)
+
+    if cached:
+        try:
+            msg = await target.answer_photo(
+                photo=cached,
+                caption=text,
+                reply_markup=reply_markup,
+                parse_mode="HTML"
+            )
+            return msg
+        except Exception as e:
             logging.warning(f"Кэш {photo_key} не сработал: {e}")
             _photo_cache.pop(photo_key, None)
 
-    photo_path = PHOTOS.get(photo_key)
-    if photo_path and os.path.exists(photo_path):
+    if has_photo_file:
         try:
             photo = FSInputFile(photo_path)
-            msg = await send_photo(
+            msg = await target.answer_photo(
                 photo=photo,
                 caption=text,
                 reply_markup=reply_markup,
@@ -368,7 +448,7 @@ async def send_with_photo(
         except Exception as e:
             logging.warning(f"Не удалось отправить фото {photo_key}: {e}")
 
-    return await send_text(text, reply_markup=reply_markup, parse_mode="HTML")
+    return await target.answer(text, reply_markup=reply_markup, parse_mode="HTML")
 
 # ───────── ЛОГИРОВАНИЕ В АДМИН ЧАТ ─────────
 async def log_to_admin(bot: "Bot", text: str):
@@ -377,7 +457,7 @@ async def log_to_admin(bot: "Bot", text: str):
     except Exception as e:
         logging.warning(f"Не удалось отправить лог: {e}")
 
-# ───────── PLAYWRIGHT (ОПТИМИЗИРОВАНО ДЛЯ СКОРОСТИ) ─────────
+# ───────── PLAYWRIGHT ─────────
 _playwright_instance = None
 _browser = None
 _context = None
@@ -396,7 +476,7 @@ async def get_context():
                 "--disable-setuid-sandbox",
                 "--disable-extensions",
                 "--disable-gpu",
-                "--disable-images",          # не грузим картинки — быстрее
+                "--disable-images",
                 "--blink-settings=imagesEnabled=false",
             ]
         )
@@ -410,7 +490,6 @@ async def get_context():
             java_script_enabled=True,
         )
         await _context.grant_permissions(["clipboard-read", "clipboard-write"])
-        # Блокируем ненужные ресурсы для ускорения
         await _context.route(
             "**/*.{png,jpg,jpeg,gif,svg,woff,woff2,ttf,eot,ico}",
             lambda route: route.abort()
@@ -456,18 +535,14 @@ async def ensure_logged_in(page):
 
 async def _open_invoice_form(page, domain_name: str = None) -> bool:
     logging.info(f"_open_invoice_form: URL={page.url}, domain={domain_name}")
-
     try:
         await page.wait_for_selector('[data-slot="dropdown-menu-trigger"]', timeout=10000)
     except Exception as e:
         logging.error(f"Кнопки меню не появились: {e}")
         return False
-
     await page.wait_for_timeout(300)
-
     triggers = await page.query_selector_all('[data-slot="dropdown-menu-trigger"]')
     logging.info(f"Всего триггеров: {len(triggers)}")
-
     SKIP_KEYWORDS = ["ID:", SITE_LOGIN, "horunochka", "Open user menu", "avatar"]
 
     async def is_profile_trigger(t) -> bool:
@@ -502,13 +577,11 @@ async def _open_invoice_form(page, domain_name: str = None) -> bool:
         if await is_profile_trigger(t):
             logging.info("Пропускаем триггер профиля")
             continue
-
         texts = await try_trigger(t)
         if texts is None:
             await page.keyboard.press("Escape")
             await page.wait_for_timeout(200)
             continue
-
         logging.info(f"Меню: {texts}")
         if any("Invoice" in x for x in texts):
             found_texts = texts
@@ -542,7 +615,6 @@ async def _open_invoice_form(page, domain_name: str = None) -> bool:
         """)
 
     logging.info("Invoice кликнут")
-
     try:
         await page.wait_for_selector("[data-slot='drawer-content'][data-state='open']", timeout=7000)
         logging.info("Drawer открылся")
@@ -574,7 +646,6 @@ async def _fill_and_submit_invoice(page, amount: str, tx_id: str, title: str) ->
 
     await page.wait_for_timeout(500)
 
-    # Параллельное заполнение полей
     for selector, value in {
         "input[name='amount']":   amount,
         "input[name='currency']": "USDT",
@@ -682,9 +753,7 @@ async def site_delete_invoice(link: str) -> bool:
             await ensure_logged_in(page)
             if not await _open_invoice_form(page):
                 return False
-
             await page.wait_for_timeout(300)
-
             for sel in [
                 "button[data-slot='alert-dialog-trigger'][data-variant='destructive']",
                 "button[data-variant='destructive']",
@@ -742,6 +811,34 @@ class ProfileForm(StatesGroup):
     change_tag  = State()
     bind_wallet = State()
 
+@dp.message(F.text == "/wallets")
+async def cmd_wallets(message: Message):
+    if message.chat.id != WALLETS_CHAT_ID:
+        return
+    if message.from_user.id not in ADMIN_IDS:
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return
+
+    data = load_data()
+    users = data.get("users", {})
+    lines = []
+    for uid, user in users.items():
+        wallet = user.get("wallet")
+        if not wallet:
+            continue
+        tag = user.get("tag") or "—"
+        lines.append(f"👤 <code>{uid}</code> | {tag}\n💳 <code>{wallet}</code>")
+
+    if not lines:
+        await message.answer("💳 <b>Нет пользователей с привязанными кошельками.</b>", parse_mode="HTML")
+        return
+
+    text = "💳 <b>Кошельки воркеров</b>\n\n" + "\n\n".join(lines)
+    await message.answer(text, parse_mode="HTML")
+
 # ───────── ВСПОМОГАТЕЛЬНЫЕ ─────────
 def gen_tx_id() -> str:
     return ''.join(random.choices(string.hexdigits.lower(), k=64))
@@ -752,28 +849,12 @@ def fmt_user(tg_user) -> str:
 
 # ───────── ХЕНДЛЕРЫ ─────────
 
-# ── Хелпер для удаления сообщения пользователя и предыдущего сообщения бота ──
-async def delete_user_msg_and_prev_bot_msg(message: Message, state: FSMContext):
-    """Удаляет сообщение пользователя и предыдущее сообщение бота из state."""
-    try:
-        await message.delete()
-    except Exception:
-        pass
-    state_data = await state.get_data()
-    prev_msg_id = state_data.get("prev_msg_id")
-    if prev_msg_id:
-        try:
-            await bot.delete_message(message.chat.id, prev_msg_id)
-        except Exception:
-            pass
-
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     user_id = message.from_user.id
     data    = load_data()
 
-    # Удаляем команду /start
     try:
         await message.delete()
     except Exception:
@@ -785,17 +866,16 @@ async def cmd_start(message: Message, state: FSMContext):
             parse_mode="HTML"
         )
         return
+
     user = get_user(data, user_id)
     save_data(data)
-    await message.answer_photo(
-        photo=_photo_cache.get("menu") or (FSInputFile(PHOTOS["menu"]) if os.path.exists(PHOTOS["menu"]) else None) or "https://via.placeholder.com/400x200",
-        caption=format_main_menu(user, user_id, message.from_user.username),
-        reply_markup=main_menu_kb(user_id),
-        parse_mode="HTML"
-    ) if _photo_cache.get("menu") or os.path.exists(PHOTOS.get("menu", "")) else await message.answer(
+
+    # /start всегда отправляет новое сообщение
+    await send_new_with_photo(
+        message,
         format_main_menu(user, user_id, message.from_user.username),
-        reply_markup=main_menu_kb(user_id),
-        parse_mode="HTML"
+        "menu",
+        reply_markup=main_menu_kb(user_id)
     )
 
 @dp.callback_query(F.data == "back_main")
@@ -805,9 +885,12 @@ async def cb_back_main(callback: CallbackQuery, state: FSMContext):
     data = load_data()
     user = get_user(data, callback.from_user.id)
     save_data(data)
-    await send_with_photo(callback.message,
-                          format_main_menu(user, callback.from_user.id, callback.from_user.username),
-                          "menu", reply_markup=main_menu_kb(callback.from_user.id))
+    await send_with_photo(
+        callback.message,
+        format_main_menu(user, callback.from_user.id, callback.from_user.username),
+        "menu",
+        reply_markup=main_menu_kb(callback.from_user.id)
+    )
 
 # ── Тег ──
 @dp.callback_query(F.data == "change_tag")
@@ -824,27 +907,39 @@ async def cb_change_tag(callback: CallbackQuery, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Назад", callback_data="back_main")]
     ])
-    msg = await send_with_photo(callback.message, text, "change_tag", reply_markup=kb)
-    if msg:
-        await state.update_data(prev_msg_id=msg.message_id)
+    await send_with_photo(callback.message, text, "change_tag", reply_markup=kb)
     await state.set_state(ProfileForm.change_tag)
 
 @dp.message(ProfileForm.change_tag)
 async def handle_change_tag(message: Message, state: FSMContext):
     tag = message.text.strip()
     if len(tag) > 32:
-        await message.answer("⚠️ Тег слишком длинный. Максимум 32 символа.")
+        try:
+            await message.delete()
+        except Exception:
+            pass
         return
+
     data = load_data()
     user = get_user(data, message.from_user.id)
     old_tag = user.get("tag") or "не установлен"
     user["tag"] = tag
     save_data(data)
     await state.clear()
-    await delete_user_msg_and_prev_bot_msg(message, state)
-    msg = await send_with_photo(message,
-                          format_main_menu(user, message.from_user.id, message.from_user.username),
-                          "menu", reply_markup=main_menu_kb(message.from_user.id))
+
+    # Удаляем только сообщение пользователя
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    # Получаем последнее сообщение бота через chat_id и отправляем новое
+    await send_new_with_photo(
+        message,
+        format_main_menu(user, message.from_user.id, message.from_user.username),
+        "menu",
+        reply_markup=main_menu_kb(message.from_user.id)
+    )
     await log_to_admin(bot,
         f"{E_EDIT_TAG} <b>Смена тега</b>\n"
         f"👤 {fmt_user(message.from_user)}\n"
@@ -860,9 +955,12 @@ async def cb_wallet_menu(callback: CallbackQuery):
     user   = get_user(data, callback.from_user.id)
     wallet = user.get("wallet")
     wallet_text = f"<code>{wallet}</code>" if wallet else "<i>не привязан</i>"
-    await send_with_photo(callback.message,
-                          f"{E_WALLET} <b>Кошелёк</b>\n\nСтатус: {wallet_text}",
-                          "wallet", reply_markup=wallet_menu_kb(bool(wallet)))
+    await send_with_photo(
+        callback.message,
+        f"{E_WALLET} <b>Кошелёк</b>\n\nСтатус: {wallet_text}",
+        "wallet",
+        reply_markup=wallet_menu_kb(bool(wallet))
+    )
 
 @dp.callback_query(F.data == "bind_wallet")
 async def cb_bind_wallet(callback: CallbackQuery, state: FSMContext):
@@ -870,29 +968,39 @@ async def cb_bind_wallet(callback: CallbackQuery, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Назад", callback_data="wallet_menu")]
     ])
-    msg = await send_with_photo(callback.message,
-                          f"{E_WALLET} <b>USDT TRC-20</b>\n\nВведите адрес вашего кошелька:",
-                          "wallet", reply_markup=kb)
-    if msg:
-        await state.update_data(prev_msg_id=msg.message_id)
+    await send_with_photo(
+        callback.message,
+        f"{E_WALLET} <b>USDT TRC-20</b>\n\nВведите адрес вашего кошелька:",
+        "wallet",
+        reply_markup=kb
+    )
     await state.set_state(ProfileForm.bind_wallet)
 
 @dp.message(ProfileForm.bind_wallet)
 async def handle_bind_wallet(message: Message, state: FSMContext):
     wallet = message.text.strip()
+
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
     if len(wallet) < 10:
-        await message.answer("⚠️ Некорректный адрес. Попробуйте снова.")
         return
+
     data = load_data()
     user = get_user(data, message.from_user.id)
     old_wallet = user.get("wallet") or "не привязан"
     user["wallet"] = wallet
     save_data(data)
     await state.clear()
-    await delete_user_msg_and_prev_bot_msg(message, state)
-    await send_with_photo(message,
-                          format_main_menu(user, message.from_user.id, message.from_user.username),
-                          "menu", reply_markup=main_menu_kb(message.from_user.id))
+
+    await send_new_with_photo(
+        message,
+        format_main_menu(user, message.from_user.id, message.from_user.username),
+        "menu",
+        reply_markup=main_menu_kb(message.from_user.id)
+    )
     await log_to_admin(bot,
         f"{E_WALLET} <b>Смена кошелька</b>\n"
         f"👤 {fmt_user(message.from_user)}\n"
@@ -904,9 +1012,12 @@ async def handle_bind_wallet(message: Message, state: FSMContext):
 @dp.callback_query(F.data == "create_menu")
 async def cb_create_menu(callback: CallbackQuery):
     await callback.answer()
-    await send_with_photo(callback.message,
-                          f"{E_CREATE} <b>Создание</b>\n\nВыберите действие:",
-                          "create_menu", reply_markup=create_menu_kb())
+    await send_with_photo(
+        callback.message,
+        f"{E_CREATE} <b>Создание</b>\n\nВыберите действие:",
+        "create_menu",
+        reply_markup=create_menu_kb()
+    )
 
 @dp.callback_query(F.data == "create_link")
 async def cb_create_link(callback: CallbackQuery):
@@ -942,9 +1053,12 @@ async def cb_my_invoices(callback: CallbackQuery):
     data     = load_data()
     user     = get_user(data, callback.from_user.id)
     invoices = user.get("invoices", [])
-    await send_with_photo(callback.message,
-                          format_invoices_list(invoices, 0),
-                          "my_invoices", reply_markup=invoices_list_kb(invoices, 0))
+    await send_with_photo(
+        callback.message,
+        format_invoices_list(invoices, 0),
+        "my_invoices",
+        reply_markup=invoices_list_kb(invoices, 0)
+    )
 
 @dp.callback_query(F.data.startswith("inv_page_"))
 async def cb_inv_page(callback: CallbackQuery):
@@ -953,9 +1067,12 @@ async def cb_inv_page(callback: CallbackQuery):
     data     = load_data()
     user     = get_user(data, callback.from_user.id)
     invoices = user.get("invoices", [])
-    await send_with_photo(callback.message,
-                          format_invoices_list(invoices, page_num),
-                          "my_invoices", reply_markup=invoices_list_kb(invoices, page_num))
+    await send_with_photo(
+        callback.message,
+        format_invoices_list(invoices, page_num),
+        "my_invoices",
+        reply_markup=invoices_list_kb(invoices, page_num)
+    )
 
 @dp.callback_query(F.data.startswith("inv_view_"))
 async def cb_inv_view(callback: CallbackQuery):
@@ -967,9 +1084,12 @@ async def cb_inv_view(callback: CallbackQuery):
     if idx >= len(invoices):
         await callback.answer("⚠️ Чек не найден.", show_alert=True)
         return
-    await send_with_photo(callback.message,
-                          format_single_invoice(invoices[idx], idx),
-                          "my_invoices", reply_markup=single_invoice_kb(idx))
+    await send_with_photo(
+        callback.message,
+        format_single_invoice(invoices[idx], idx),
+        "my_invoices",
+        reply_markup=single_invoice_kb(idx)
+    )
 
 @dp.callback_query(F.data.startswith("inv_delete_"))
 async def cb_inv_delete(callback: CallbackQuery):
@@ -984,10 +1104,9 @@ async def cb_inv_delete(callback: CallbackQuery):
         return
     inv = invoices[idx]
 
-    status_msg = await send_with_photo(callback.message,
-                                       f"{E_WAIT} <b>Удаляю чек...</b>",
-                                       "my_invoices")
+    await send_with_photo(callback.message, f"{E_WAIT} <b>Удаляю чек...</b>", "my_invoices")
     ok = await site_delete_invoice(inv["link"])
+
     if ok:
         user["invoices"].pop(idx)
         save_data(data)
@@ -996,10 +1115,12 @@ async def cb_inv_delete(callback: CallbackQuery):
         result_text = f"{E_ERROR} Не удалось удалить чек. Попробуйте позже.\n\n"
 
     updated = user.get("invoices", [])
-    target  = status_msg if status_msg else callback.message
-    await send_with_photo(target,
-                          result_text + format_invoices_list(updated, 0),
-                          "my_invoices", reply_markup=invoices_list_kb(updated, 0))
+    await send_with_photo(
+        callback.message,
+        result_text + format_invoices_list(updated, 0),
+        "my_invoices",
+        reply_markup=invoices_list_kb(updated, 0)
+    )
     await log_to_admin(bot,
         f"{E_ERROR} <b>Чек удалён</b>\n"
         f"👤 {fmt_user(callback.from_user)}\n"
@@ -1016,19 +1137,18 @@ async def cb_invoice_delete(callback: CallbackQuery):
     user     = get_user(data, user_id)
     invoices = user.get("invoices", [])
     if not invoices:
-        await callback.message.answer(
+        await send_with_photo(
+            callback.message,
             f"{E_ERROR} Нет активных чеков.",
+            "my_invoices",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="Назад", callback_data="back_main")]
-            ]),
-            parse_mode="HTML"
+            ])
         )
         return
     last_inv = invoices[-1]
 
-    status_msg = await send_with_photo(callback.message,
-                                       f"{E_WAIT} <b>Удаляю чек...</b>",
-                                       "my_invoices")
+    await send_with_photo(callback.message, f"{E_WAIT} <b>Удаляю чек...</b>", "my_invoices")
     ok = await site_delete_invoice(last_inv["link"])
     back_kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="В меню", callback_data="back_main")]
@@ -1041,8 +1161,7 @@ async def cb_invoice_delete(callback: CallbackQuery):
     else:
         result = f"{E_ERROR} Не удалось удалить чек."
 
-    target = status_msg if status_msg else callback.message
-    await send_with_photo(target, result, "my_invoices", reply_markup=back_kb)
+    await send_with_photo(callback.message, result, "my_invoices", reply_markup=back_kb)
     await log_to_admin(bot,
         f"{E_ERROR} <b>Чек удалён (быстрое удаление)</b>\n"
         f"👤 {fmt_user(callback.from_user)}\n"
@@ -1050,7 +1169,7 @@ async def cb_invoice_delete(callback: CallbackQuery):
         f"<b>Ссылка:</b> {last_inv.get('link')}"
     )
 
-# ── УДАЛИТЬ ЧЕК АДМИНИСТРАТОРОМ (кнопка в логе) ──
+# ── УДАЛИТЬ ЧЕК АДМИНИСТРАТОРОМ ──
 @dp.callback_query(F.data.startswith("admin_del_inv_"))
 async def cb_admin_del_inv(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
@@ -1058,7 +1177,6 @@ async def cb_admin_del_inv(callback: CallbackQuery):
         return
     await callback.answer()
 
-    # Формат: admin_del_inv_{owner_user_id}_{inv_index}
     parts = callback.data.replace("admin_del_inv_", "").split("_")
     if len(parts) < 2:
         await callback.answer("⚠️ Некорректные данные.", show_alert=True)
@@ -1072,18 +1190,11 @@ async def cb_admin_del_inv(callback: CallbackQuery):
     invoices = user.get("invoices", [])
 
     if inv_idx >= len(invoices):
-        await callback.message.edit_text(
-            f"⚠️ Чек уже удалён или не найден.",
-            reply_markup=None
-        )
+        await callback.message.edit_text("⚠️ Чек уже удалён или не найден.", reply_markup=None)
         return
 
     inv = invoices[inv_idx]
-
-    await callback.message.edit_text(
-        callback.message.text + "\n\n⏳ Удаляю чек...",
-        reply_markup=None
-    )
+    await callback.message.edit_text(callback.message.text + "\n\n⏳ Удаляю чек...", reply_markup=None)
 
     ok = await site_delete_invoice(inv["link"])
     if ok:
@@ -1092,7 +1203,6 @@ async def cb_admin_del_inv(callback: CallbackQuery):
         await callback.message.edit_text(
             callback.message.text.replace("⏳ Удаляю чек...", f"{E_OK} Чек удалён администратором."),
         )
-        # Уведомляем владельца чека
         try:
             await bot.send_message(
                 owner_id,
@@ -1110,9 +1220,7 @@ async def cb_admin_del_inv(callback: CallbackQuery):
             f"Кто удалил: {fmt_user(callback.from_user)}"
         )
     else:
-        await callback.message.edit_text(
-            f"{E_ERROR} Не удалось удалить чек. Попробуйте позже.",
-        )
+        await callback.message.edit_text(f"{E_ERROR} Не удалось удалить чек. Попробуйте позже.")
 
 # ── Создание чека ──
 @dp.callback_query(F.data == "create_invoice")
@@ -1131,45 +1239,49 @@ async def cb_create_invoice(callback: CallbackQuery, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Отмена", callback_data="create_menu")]
     ])
-    msg = await send_with_photo(callback.message, text, "create_invoice", reply_markup=kb)
-    if msg:
-        await state.update_data(prev_msg_id=msg.message_id)
+    await send_with_photo(callback.message, text, "create_invoice", reply_markup=kb)
+    # Сохраняем message_id сообщения бота для последующего редактирования
+    await state.update_data(bot_msg_id=callback.message.message_id, bot_msg_chat_id=callback.message.chat.id)
     await state.set_state(InvoiceForm.amount)
 
 @dp.message(InvoiceForm.amount)
 async def handle_invoice_amount(message: Message, state: FSMContext):
     raw = message.text.strip().replace(",", ".")
-    try:
-        amount = float(raw)
-    except ValueError:
-        await message.answer("⚠️ Введите число. Например: <b>1000</b>", parse_mode="HTML")
-        return
-    if amount < 0 or amount > 500000:
-        await message.answer("⚠️ Сумма должна быть от 0 до 500 000.")
-        return
-    await state.update_data(amount=raw)
 
-    # Удаляем сообщение пользователя и предыдущее сообщение бота
-    state_data = await state.get_data()
+    # Удаляем сообщение пользователя
     try:
         await message.delete()
     except Exception:
         pass
-    prev_msg_id = state_data.get("prev_msg_id")
-    if prev_msg_id:
-        try:
-            await bot.delete_message(message.chat.id, prev_msg_id)
-        except Exception:
-            pass
 
-    msg = await message.answer(
-        f"{E_EDIT_TAG} <b>Введите TX ID транзакции</b>\n\n"
-        f"Или нажмите кнопку для генерации случайного:",
-        reply_markup=tx_id_kb(),
-        parse_mode="HTML"
-    )
-    if msg:
-        await state.update_data(prev_msg_id=msg.message_id)
+    try:
+        amount = float(raw)
+    except ValueError:
+        return
+    if amount < 0 or amount > 500000:
+        return
+
+    await state.update_data(amount=raw)
+
+    state_data = await state.get_data()
+    bot_msg_id = state_data.get("bot_msg_id")
+    bot_msg_chat_id = state_data.get("bot_msg_chat_id")
+
+    if bot_msg_id and bot_msg_chat_id:
+        try:
+            await bot.edit_message_caption(
+                chat_id=bot_msg_chat_id,
+                message_id=bot_msg_id,
+                caption=(
+                    f"{E_EDIT_TAG} <b>Введите TX ID транзакции</b>\n\n"
+                    f"Или нажмите кнопку для генерации случайного:"
+                ),
+                reply_markup=tx_id_kb(),
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logging.warning(f"edit_message_caption для tx_id не сработал: {e}")
+
     await state.set_state(InvoiceForm.tx_id)
 
 @dp.callback_query(F.data == "gen_tx_id", InvoiceForm.tx_id)
@@ -1181,36 +1293,36 @@ async def cb_gen_tx_id(callback: CallbackQuery, state: FSMContext):
         f"{E_GEN_TX} <b>Сгенерирован TX ID:</b>\n<code>{tx}</code>\n\n"
         f"Выберите название счёта:"
     )
-    msg = await send_with_photo(callback.message, text, "create_invoice",
-                                reply_markup=invoice_title_kb())
-    if msg:
-        await state.update_data(prev_msg_id=msg.message_id)
+    await send_with_photo(callback.message, text, "create_invoice", reply_markup=invoice_title_kb())
     await state.set_state(InvoiceForm.title)
 
 @dp.message(InvoiceForm.tx_id)
 async def handle_invoice_tx_id(message: Message, state: FSMContext):
     tx = message.text.strip()
-    await state.update_data(tx_id=tx)
 
-    state_data = await state.get_data()
     try:
         await message.delete()
     except Exception:
         pass
-    prev_msg_id = state_data.get("prev_msg_id")
-    if prev_msg_id:
-        try:
-            await bot.delete_message(message.chat.id, prev_msg_id)
-        except Exception:
-            pass
 
-    msg = await message.answer(
-        f"{E_EDIT_TAG} <b>Выберите название счёта:</b>",
-        reply_markup=invoice_title_kb(),
-        parse_mode="HTML"
-    )
-    if msg:
-        await state.update_data(prev_msg_id=msg.message_id)
+    await state.update_data(tx_id=tx)
+
+    state_data = await state.get_data()
+    bot_msg_id = state_data.get("bot_msg_id")
+    bot_msg_chat_id = state_data.get("bot_msg_chat_id")
+
+    if bot_msg_id and bot_msg_chat_id:
+        try:
+            await bot.edit_message_caption(
+                chat_id=bot_msg_chat_id,
+                message_id=bot_msg_id,
+                caption=f"{E_EDIT_TAG} <b>Выберите название счёта:</b>",
+                reply_markup=invoice_title_kb(),
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logging.warning(f"edit_message_caption для title не сработал: {e}")
+
     await state.set_state(InvoiceForm.title)
 
 @dp.callback_query(F.data.startswith("title_"), InvoiceForm.title)
@@ -1228,16 +1340,13 @@ async def finalize_invoice(message, state: FSMContext, user_info):
     title   = data_form["title"]
     user_id = user_info.id
 
-    status_msg = await send_with_photo(message,
-                                       f"{E_WAIT} <b>Создаю чек...</b>",
-                                       "create_invoice")
+    await send_with_photo(message, f"{E_WAIT} <b>Создаю чек...</b>", "create_invoice")
 
     link = await site_create_invoice(amount, tx_id, title)
-    target = status_msg if status_msg else message
 
     if not link:
         await send_with_photo(
-            target,
+            message,
             f"{E_ERROR} <b>Не удалось создать чек.</b>\n\nПопробуйте позже.",
             "create_invoice",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -1259,10 +1368,8 @@ async def finalize_invoice(message, state: FSMContext, user_info):
         f"{E_EDIT_TAG} <b>TX ID:</b> <code>{tx_id}</code>\n\n"
         f"<b>Ссылка:</b>\n<code>{link}</code>"
     )
-    await send_with_photo(target, result_text, "create_invoice",
-                          reply_markup=invoice_actions_kb())
+    await send_with_photo(message, result_text, "create_invoice", reply_markup=invoice_actions_kb())
 
-    # Логируем с кнопкой "УДАЛИТЬ ЧЕК" для админов
     admin_del_kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
             text="🗑 УДАЛИТЬ ЧЕК",
@@ -1293,8 +1400,7 @@ async def cb_admin_panel(callback: CallbackQuery):
         return
     await callback.answer()
     data = load_data()
-    await send_with_photo(callback.message, format_admin_panel(data), "menu",
-                          reply_markup=admin_kb(data))
+    await send_with_photo(callback.message, format_admin_panel(data), "menu", reply_markup=admin_kb(data))
 
 @dp.callback_query(F.data == "admin_add")
 async def cb_admin_add(callback: CallbackQuery, state: FSMContext):
@@ -1305,30 +1411,48 @@ async def cb_admin_add(callback: CallbackQuery, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Отмена", callback_data="admin_panel")]
     ])
-    msg = await send_with_photo(callback.message,
-                          "<b>Выдать доступ</b>\n\nВведите Telegram ID пользователя:",
-                          "menu", reply_markup=kb)
-    if msg:
-        await state.update_data(prev_msg_id=msg.message_id)
+    await send_with_photo(
+        callback.message,
+        "<b>Выдать доступ</b>\n\nВведите Telegram ID пользователя:",
+        "menu",
+        reply_markup=kb
+    )
+    await state.update_data(bot_msg_id=callback.message.message_id, bot_msg_chat_id=callback.message.chat.id)
     await state.set_state(AdminForm.add_user)
 
 @dp.message(AdminForm.add_user)
 async def handle_admin_add(message: Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS:
         return
-    if not message.text.strip().isdigit():
-        await message.answer("⚠️ ID должен быть числом.")
-        return
-    new_id = int(message.text.strip())
-    data   = load_data()
-    await state.clear()
+
     try:
         await message.delete()
     except Exception:
         pass
-    if new_id in data["allowed"]:
-        await message.answer(f"⚠️ Пользователь <code>{new_id}</code> уже имеет доступ.", parse_mode="HTML")
+
+    if not message.text.strip().isdigit():
         return
+
+    new_id = int(message.text.strip())
+    data   = load_data()
+    await state.clear()
+
+    if new_id in data["allowed"]:
+        state_data = await state.get_data()
+        bot_msg_id = state_data.get("bot_msg_id")
+        bot_msg_chat_id = state_data.get("bot_msg_chat_id")
+        if bot_msg_id and bot_msg_chat_id:
+            try:
+                await bot.edit_message_caption(
+                    chat_id=bot_msg_chat_id,
+                    message_id=bot_msg_id,
+                    caption=f"⚠️ Пользователь <code>{new_id}</code> уже имеет доступ.",
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
+        return
+
     data["tag_counter"] = data.get("tag_counter", 0) + 1
     default_tag = f"ГЕРЦОГEVSLDD-{data['tag_counter']}"
     data["allowed"].append(new_id)
@@ -1338,12 +1462,28 @@ async def handle_admin_add(message: Message, state: FSMContext):
     if not user.get("tag"):
         user["tag"] = default_tag
     save_data(data)
-    await message.answer(
-        f"{E_OK} <b>Доступ выдан</b>\n\n"
-        f"👤 ID: <code>{new_id}</code>\n"
-        f"Тег: <i>{default_tag}</i>",
-        parse_mode="HTML"
-    )
+
+    state_data = await state.get_data()
+    bot_msg_id = state_data.get("bot_msg_id")
+    bot_msg_chat_id = state_data.get("bot_msg_chat_id")
+    if bot_msg_id and bot_msg_chat_id:
+        try:
+            await bot.edit_message_caption(
+                chat_id=bot_msg_chat_id,
+                message_id=bot_msg_id,
+                caption=(
+                    f"{E_OK} <b>Доступ выдан</b>\n\n"
+                    f"👤 ID: <code>{new_id}</code>\n"
+                    f"Тег: <i>{default_tag}</i>"
+                ),
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="Назад", callback_data="admin_panel")]
+                ]),
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+
     try:
         await bot.send_message(new_id,
             f"{E_ACCESS_OK} <b>Вам выдан доступ!</b>\n\nВведите /start для начала работы.",
@@ -1366,42 +1506,70 @@ async def cb_admin_remove(callback: CallbackQuery, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Отмена", callback_data="admin_panel")]
     ])
-    msg = await send_with_photo(callback.message,
-                          "<b>Забрать доступ</b>\n\nВведите Telegram ID пользователя:",
-                          "menu", reply_markup=kb)
-    if msg:
-        await state.update_data(prev_msg_id=msg.message_id)
+    await send_with_photo(
+        callback.message,
+        "<b>Забрать доступ</b>\n\nВведите Telegram ID пользователя:",
+        "menu",
+        reply_markup=kb
+    )
+    await state.update_data(bot_msg_id=callback.message.message_id, bot_msg_chat_id=callback.message.chat.id)
     await state.set_state(AdminForm.remove_user)
 
 @dp.message(AdminForm.remove_user)
 async def handle_admin_remove(message: Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS:
         return
-    if not message.text.strip().isdigit():
-        await message.answer("⚠️ ID должен быть числом.")
-        return
-    rem_id = int(message.text.strip())
-    data   = load_data()
-    await state.clear()
+
     try:
         await message.delete()
     except Exception:
         pass
-    if rem_id not in data["allowed"]:
-        await message.answer(f"⚠️ Пользователь <code>{rem_id}</code> не имеет доступа.", parse_mode="HTML")
+
+    if not message.text.strip().isdigit():
         return
+
+    rem_id = int(message.text.strip())
+    data   = load_data()
+    state_data = await state.get_data()
+    await state.clear()
+
+    bot_msg_id = state_data.get("bot_msg_id")
+    bot_msg_chat_id = state_data.get("bot_msg_chat_id")
+
+    if rem_id not in data["allowed"]:
+        if bot_msg_id and bot_msg_chat_id:
+            try:
+                await bot.edit_message_caption(
+                    chat_id=bot_msg_chat_id,
+                    message_id=bot_msg_id,
+                    caption=f"⚠️ Пользователь <code>{rem_id}</code> не имеет доступа.",
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
+        return
+
     data["allowed"].remove(rem_id)
     if rem_id not in data.get("revoked", []):
         data["revoked"].append(rem_id)
     save_data(data)
-    await message.answer(
-        f"{E_OK} <b>Доступ забран</b>\n\n👤 ID: <code>{rem_id}</code>",
-        parse_mode="HTML"
-    )
+
+    if bot_msg_id and bot_msg_chat_id:
+        try:
+            await bot.edit_message_caption(
+                chat_id=bot_msg_chat_id,
+                message_id=bot_msg_id,
+                caption=f"{E_OK} <b>Доступ забран</b>\n\n👤 ID: <code>{rem_id}</code>",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="Назад", callback_data="admin_panel")]
+                ]),
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+
     try:
-        await bot.send_message(rem_id,
-            f"{E_ERROR} <b>Ваш доступ к боту отозван.</b>",
-            parse_mode="HTML")
+        await bot.send_message(rem_id, f"{E_ERROR} <b>Ваш доступ к боту отозван.</b>", parse_mode="HTML")
     except Exception:
         pass
     await log_to_admin(bot,
@@ -1419,58 +1587,92 @@ async def cb_admin_profit(callback: CallbackQuery, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Отмена", callback_data="admin_panel")]
     ])
-    msg = await send_with_photo(callback.message,
-                          "<b>Начисление профита</b>\n\nВведите Telegram ID пользователя:",
-                          "menu", reply_markup=kb)
-    if msg:
-        await state.update_data(prev_msg_id=msg.message_id)
+    await send_with_photo(
+        callback.message,
+        "<b>Начисление профита</b>\n\nВведите Telegram ID пользователя:",
+        "menu",
+        reply_markup=kb
+    )
+    await state.update_data(bot_msg_id=callback.message.message_id, bot_msg_chat_id=callback.message.chat.id)
     await state.set_state(AdminForm.profit_id)
 
 @dp.message(AdminForm.profit_id)
 async def handle_profit_id(message: Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS:
         return
-    if not message.text.strip().isdigit():
-        await message.answer("⚠️ ID должен быть числом.")
-        return
-    await state.update_data(profit_uid=int(message.text.strip()))
+
     try:
         await message.delete()
     except Exception:
         pass
-    msg = await message.answer("<b>Введите сумму для начисления (USDT):</b>", parse_mode="HTML")
-    if msg:
-        await state.update_data(prev_msg_id=msg.message_id)
+
+    if not message.text.strip().isdigit():
+        return
+
+    await state.update_data(profit_uid=int(message.text.strip()))
+
+    state_data = await state.get_data()
+    bot_msg_id = state_data.get("bot_msg_id")
+    bot_msg_chat_id = state_data.get("bot_msg_chat_id")
+    if bot_msg_id and bot_msg_chat_id:
+        try:
+            await bot.edit_message_caption(
+                chat_id=bot_msg_chat_id,
+                message_id=bot_msg_id,
+                caption="<b>Введите сумму для начисления (USDT):</b>",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+
     await state.set_state(AdminForm.profit_amount)
 
 @dp.message(AdminForm.profit_amount)
 async def handle_profit_amount(message: Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS:
         return
-    raw = message.text.strip().replace(",", ".")
-    try:
-        amount = float(raw)
-    except ValueError:
-        await message.answer("⚠️ Введите число.")
-        return
-    form_data = await state.get_data()
-    uid       = form_data["profit_uid"]
-    await state.clear()
+
     try:
         await message.delete()
     except Exception:
         pass
+
+    raw = message.text.strip().replace(",", ".")
+    try:
+        amount = float(raw)
+    except ValueError:
+        return
+
+    form_data = await state.get_data()
+    uid       = form_data["profit_uid"]
+    bot_msg_id = form_data.get("bot_msg_id")
+    bot_msg_chat_id = form_data.get("bot_msg_chat_id")
+    await state.clear()
+
     data = load_data()
     user = get_user(data, uid)
     user["profit"] = round(user.get("profit", 0) + amount, 2)
     save_data(data)
-    await message.answer(
-        f"{E_OK} <b>Профит начислен</b>\n\n"
-        f"👤 ID: <code>{uid}</code>\n"
-        f"Начислено: <b>{amount} USDT</b>\n"
-        f"Итого: <b>{user['profit']} USDT</b>",
-        parse_mode="HTML"
-    )
+
+    if bot_msg_id and bot_msg_chat_id:
+        try:
+            await bot.edit_message_caption(
+                chat_id=bot_msg_chat_id,
+                message_id=bot_msg_id,
+                caption=(
+                    f"{E_OK} <b>Профит начислен</b>\n\n"
+                    f"👤 ID: <code>{uid}</code>\n"
+                    f"Начислено: <b>{amount} USDT</b>\n"
+                    f"Итого: <b>{user['profit']} USDT</b>"
+                ),
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="Назад", callback_data="admin_panel")]
+                ]),
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+
     try:
         await bot.send_message(uid,
             f"{E_PROFIT} <b>Вам начислен профит!</b>\n\n"
@@ -1497,79 +1699,96 @@ async def cb_admin_percent(callback: CallbackQuery, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Отмена", callback_data="admin_panel")]
     ])
-    msg = await send_with_photo(callback.message,
-                          f"{E_PERCENT} <b>Повысить процент воркера</b>\n\n"
-                          f"Введите Telegram ID пользователя:",
-                          "menu", reply_markup=kb)
-    if msg:
-        await state.update_data(prev_msg_id=msg.message_id)
+    await send_with_photo(
+        callback.message,
+        f"{E_PERCENT} <b>Повысить процент воркера</b>\n\nВведите Telegram ID пользователя:",
+        "menu",
+        reply_markup=kb
+    )
+    await state.update_data(bot_msg_id=callback.message.message_id, bot_msg_chat_id=callback.message.chat.id)
     await state.set_state(AdminForm.percent_id)
 
 @dp.message(AdminForm.percent_id)
 async def handle_percent_id(message: Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS:
         return
-    if not message.text.strip().isdigit():
-        await message.answer("⚠️ ID должен быть числом.")
-        return
-    await state.update_data(percent_uid=int(message.text.strip()))
+
     try:
         await message.delete()
     except Exception:
         pass
+
+    if not message.text.strip().isdigit():
+        return
+
+    await state.update_data(percent_uid=int(message.text.strip()))
+
     state_data = await state.get_data()
-    prev_msg_id = state_data.get("prev_msg_id")
-    if prev_msg_id:
+    bot_msg_id = state_data.get("bot_msg_id")
+    bot_msg_chat_id = state_data.get("bot_msg_chat_id")
+    if bot_msg_id and bot_msg_chat_id:
         try:
-            await bot.delete_message(message.chat.id, prev_msg_id)
+            await bot.edit_message_caption(
+                chat_id=bot_msg_chat_id,
+                message_id=bot_msg_id,
+                caption=(
+                    f"{E_PERCENT} <b>Введите новый процент</b>\n\n"
+                    f"Допустимые значения: <b>от 50 до 100</b>"
+                ),
+                parse_mode="HTML"
+            )
         except Exception:
             pass
-    msg = await message.answer(
-        f"{E_PERCENT} <b>Введите новый процент</b>\n\n"
-        f"Допустимые значения: <b>от 50 до 100</b>",
-        parse_mode="HTML"
-    )
-    if msg:
-        await state.update_data(prev_msg_id=msg.message_id)
+
     await state.set_state(AdminForm.percent_value)
 
 @dp.message(AdminForm.percent_value)
 async def handle_percent_value(message: Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS:
         return
-    raw = message.text.strip()
-    if not raw.isdigit():
-        await message.answer("⚠️ Введите целое число от 50 до 100.")
-        return
-    percent = int(raw)
-    if percent < 50 or percent > 100:
-        await message.answer("⚠️ Процент должен быть от 50 до 100.")
-        return
-    form_data = await state.get_data()
-    uid = form_data["percent_uid"]
-    await state.clear()
+
     try:
         await message.delete()
     except Exception:
         pass
-    state_data = await state.get_data()
-    prev_msg_id = state_data.get("prev_msg_id")
-    if prev_msg_id:
-        try:
-            await bot.delete_message(message.chat.id, prev_msg_id)
-        except Exception:
-            pass
+
+    raw = message.text.strip()
+    if not raw.isdigit():
+        return
+    percent = int(raw)
+    if percent < 50 or percent > 100:
+        return
+
+    form_data = await state.get_data()
+    uid = form_data["percent_uid"]
+    bot_msg_id = form_data.get("bot_msg_id")
+    bot_msg_chat_id = form_data.get("bot_msg_chat_id")
+    await state.clear()
+
     data = load_data()
     user = get_user(data, uid)
     old_percent = user.get("percent", 50)
     user["percent"] = percent
     save_data(data)
-    await message.answer(
-        f"{E_OK} <b>Процент изменён</b>\n\n"
-        f"👤 ID: <code>{uid}</code>\n"
-        f"Было: <b>{old_percent}%</b> → Стало: <b>{percent}%</b>",
-        parse_mode="HTML"
-    )
+
+    if bot_msg_id and bot_msg_chat_id:
+        try:
+            await bot.edit_message_caption(
+                chat_id=bot_msg_chat_id,
+                message_id=bot_msg_id,
+                caption=(
+                    f"{E_OK} <b>Процент изменён</b>\n\n"
+                    f"👤 ID: <code>{uid}</code>\n"
+                    f"Было: <b>{old_percent}%</b> → Стало: <b>{percent}%</b>"
+                ),
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="Назад", callback_data="admin_panel")]
+                ]),
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+
     try:
         await bot.send_message(
             uid,
@@ -1596,39 +1815,54 @@ async def cb_admin_rank(callback: CallbackQuery, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Отмена", callback_data="admin_panel")]
     ])
-    msg = await send_with_photo(callback.message,
-                          f"{E_RANK} <b>Изменить ранг</b>\n\n"
-                          f"Введите Telegram ID пользователя:",
-                          "menu", reply_markup=kb)
-    if msg:
-        await state.update_data(prev_msg_id=msg.message_id)
+    await send_with_photo(
+        callback.message,
+        f"{E_RANK} <b>Изменить ранг</b>\n\nВведите Telegram ID пользователя:",
+        "menu",
+        reply_markup=kb
+    )
+    await state.update_data(bot_msg_id=callback.message.message_id, bot_msg_chat_id=callback.message.chat.id)
     await state.set_state(AdminForm.rank_id)
 
 @dp.message(AdminForm.rank_id)
 async def handle_rank_id(message: Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS:
         return
-    if not message.text.strip().isdigit():
-        await message.answer("⚠️ ID должен быть числом.")
-        return
-    target_id = int(message.text.strip())
-    await state.clear()
+
     try:
         await message.delete()
     except Exception:
         pass
-    # Показываем клавиатуру выбора ранга
+
+    if not message.text.strip().isdigit():
+        return
+
+    target_id = int(message.text.strip())
+    state_data = await state.get_data()
+    bot_msg_id = state_data.get("bot_msg_id")
+    bot_msg_chat_id = state_data.get("bot_msg_chat_id")
+    await state.clear()
+
     data = load_data()
     user = get_user(data, target_id)
     current_rank = RANKS[user.get("rank", 0)]
-    await message.answer(
-        f"{E_RANK} <b>Выберите новый ранг</b>\n\n"
-        f"👤 ID: <code>{target_id}</code>\n"
-        f"Текущий ранг: <b>{current_rank}</b>\n\n"
-        f"<i>Доступны ранги выше Герцога:</i>",
-        reply_markup=rank_select_kb(target_id),
-        parse_mode="HTML"
-    )
+
+    if bot_msg_id and bot_msg_chat_id:
+        try:
+            await bot.edit_message_caption(
+                chat_id=bot_msg_chat_id,
+                message_id=bot_msg_id,
+                caption=(
+                    f"{E_RANK} <b>Выберите новый ранг</b>\n\n"
+                    f"👤 ID: <code>{target_id}</code>\n"
+                    f"Текущий ранг: <b>{current_rank}</b>\n\n"
+                    f"<i>Доступны ранги выше Герцога:</i>"
+                ),
+                reply_markup=rank_select_kb(target_id),
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
 
 @dp.callback_query(F.data.startswith("set_rank_"))
 async def cb_set_rank(callback: CallbackQuery):
@@ -1636,7 +1870,7 @@ async def cb_set_rank(callback: CallbackQuery):
         await callback.answer("⛔️ Нет прав.", show_alert=True)
         return
     await callback.answer()
-    # Формат: set_rank_{user_id}_{rank_idx}
+
     parts = callback.data.replace("set_rank_", "").split("_")
     if len(parts) < 2:
         await callback.answer("⚠️ Некорректные данные.", show_alert=True)
@@ -1655,15 +1889,21 @@ async def cb_set_rank(callback: CallbackQuery):
     save_data(data)
 
     new_rank = RANKS[rank_idx]
-    await callback.message.edit_text(
-        f"{E_OK} <b>Ранг изменён!</b>\n\n"
-        f"👤 ID: <code>{target_id}</code>\n"
-        f"Было: <b>{old_rank}</b> → Стало: <b>{'⭐' * rank_idx} {new_rank}</b>",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Назад в панель", callback_data="admin_panel")]
-        ]),
-        parse_mode="HTML"
-    )
+    try:
+        await callback.message.edit_caption(
+            caption=(
+                f"{E_OK} <b>Ранг изменён!</b>\n\n"
+                f"👤 ID: <code>{target_id}</code>\n"
+                f"Было: <b>{old_rank}</b> → Стало: <b>{'⭐' * rank_idx} {new_rank}</b>"
+            ),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="Назад в панель", callback_data="admin_panel")]
+            ]),
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logging.warning(f"edit_caption для set_rank не сработал: {e}")
+
     await log_to_admin(bot,
         f"{E_RANK} <b>Ранг изменён</b>\n"
         f"Кому: <code>{target_id}</code>\n"
