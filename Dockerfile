@@ -2,7 +2,8 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ENV PLAYWRIGHT_BROWSERS_PATH=/app/playwright-browsers
+RUN playwright install chromium
 
 RUN apt-get update && apt-get install -y \
     wget curl gnupg ca-certificates \
