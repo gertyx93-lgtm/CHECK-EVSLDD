@@ -18,6 +18,15 @@ from playwright.async_api import async_playwright
 
 logging.basicConfig(level=logging.INFO)
 
+browsers_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "/app/data/playwright-browsers")
+chromium_path = os.path.join(browsers_path, "chromium-1117")
+
+if not os.path.exists(chromium_path):
+    print("Устанавливаю Chromium...")
+    os.makedirs(browsers_path, exist_ok=True)
+    subprocess.run(["playwright", "install", "chromium"], check=True)
+    print("Chromium установлен!")
+
 # ───────── НАСТРОЙКИ ─────────
 BOT_TOKEN = "8675353888:AAGVSKQGQqSNkRLE_nC1OtLpJDklyDcyAkU"
 LOG_CHAT_ID = -1003842299691
