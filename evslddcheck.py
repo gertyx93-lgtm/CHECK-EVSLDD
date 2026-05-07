@@ -506,7 +506,6 @@ async def site_login(page):
     logging.info(f"Залогинился. URL: {page.url}")
 
 async def ensure_logged_in(page):
-    """Проверяет авторизацию и дожидается загрузки страницы"""
     await page.goto(f"{SITE_URL}/domains", timeout=60000, wait_until="networkidle")
     await page.wait_for_timeout(6000)
 
@@ -534,7 +533,6 @@ async def _open_invoice_form(page, domain_name: str = None) -> bool:
         logging.error(f"Кнопки меню не появились: {e}")
         try:
             await page.screenshot(path="debug_no_menu.png")
-            logging.info("Скриншот сохранён: debug_no_menu.png")
         except Exception:
             pass
         return False
@@ -556,12 +554,17 @@ async def _open_invoice_form(page, domain_name: str = None) -> bool:
 
     async def try_trigger(t) -> list | None:
         if not await t.is_visible():
+            logging.info("Триггер не видим, пропускаем")
             return None
+        logging.info("Кликаем триггер...")
         await t.click()
         await page.wait_for_timeout(600)
+        logging.info("Ждём открытия меню...")
         try:
             await page.wait_for_selector('div[role="menu"][data-state="open"]', timeout=3000)
+            logging.info("Меню открылось")
         except Exception:
+            logging.info("Меню не открылось за 3с")
             return None
         texts = await page.evaluate("""
             () => {
@@ -570,21 +573,23 @@ async def _open_invoice_form(page, domain_name: str = None) -> bool:
                 return Array.from(m.querySelectorAll('div[role="menuitem"]')).map(i => i.textContent.trim());
             }
         """)
+        logging.info(f"Тексты меню: {texts}")
         return texts if texts else None
 
     found_texts = None
-    for t in triggers:
+    for i, t in enumerate(triggers):
+        logging.info(f"Проверяем триггер #{i}")
         if await is_profile_trigger(t):
-            logging.info("Пропускаем триггер профиля")
+            logging.info(f"Триггер #{i} — профиль, пропускаем")
             continue
         texts = await try_trigger(t)
         if texts is None:
             await page.keyboard.press("Escape")
             await page.wait_for_timeout(200)
             continue
-        logging.info(f"Меню: {texts}")
         if any("Invoice" in x for x in texts):
             found_texts = texts
+            logging.info(f"Invoice найден в триггере #{i}")
             break
         else:
             await page.keyboard.press("Escape")
@@ -594,7 +599,6 @@ async def _open_invoice_form(page, domain_name: str = None) -> bool:
         logging.error("Invoice не найден ни в одном меню")
         try:
             await page.screenshot(path="debug_no_invoice.png")
-            logging.info("Скриншот сохранён: debug_no_invoice.png")
         except Exception:
             pass
         return False
@@ -623,7 +627,6 @@ async def _open_invoice_form(page, domain_name: str = None) -> bool:
         logging.error(f"Drawer не открылся: {e}")
         try:
             await page.screenshot(path="debug_drawer.png")
-            logging.info("Скриншот сохранён: debug_drawer.png")
         except Exception:
             pass
         return False
@@ -790,7 +793,6 @@ async def site_delete_invoice(link: str) -> bool:
         logging.error(f"site_delete_invoice ошибка: {e}")
         await reset_browser()
         return False
-
 # ───────── BOT ─────────
 bot = Bot(token=BOT_TOKEN)
 dp  = Dispatcher(storage=MemoryStorage())
