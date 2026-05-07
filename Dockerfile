@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-RUN mkdir -p /app/data/playwright-browsers && playwright install chromium
+RUN RUN mkdir -p /app/data/playwright-browsers
 COPY . .
 ENV DATA_DIR=/app/data
 RUN mkdir -p /app/data
