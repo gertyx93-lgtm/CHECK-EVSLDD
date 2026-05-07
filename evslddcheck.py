@@ -447,11 +447,17 @@ async def get_context():
             headless=True,
             args=[
                 "--no-sandbox",
-                "--disable-blink-features=AutomationControlled",
-                "--disable-dev-shm-usage",
                 "--disable-setuid-sandbox",
-                "--disable-extensions",
+                "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationControlled",
                 "--disable-gpu",
+                "--window-size=1920,1080",
+                "--disable-infobars",
+                "--disable-extensions",
+                "--no-first-run",
+                "--ignore-certificate-errors",
+                "--disable-web-security",
+                "--allow-running-insecure-content",
             ]
         )
         _context = await _browser.new_context(
@@ -462,7 +468,14 @@ async def get_context():
             ),
             locale="en-US",
             java_script_enabled=True,
+            viewport={"width": 1920, "height": 1080},
         )
+        await _context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
+            Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+            window.chrome = { runtime: {} };
+        """)
         await _context.grant_permissions(["clipboard-read", "clipboard-write"])
     return _context
 
@@ -480,56 +493,56 @@ async def reset_browser():
 
 async def site_login(page):
     logging.info("Выполняю логин...")
-    await page.goto(f"{SITE_URL}/auth/login", timeout=30000, wait_until="domcontentloaded")
+    await page.goto(f"{SITE_URL}/auth/login", timeout=60000, wait_until="domcontentloaded")
+    await page.wait_for_timeout(2000)
     await page.wait_for_selector("input[name='login']", timeout=15000)
     await page.fill("input[name='login']", SITE_LOGIN)
+    await page.wait_for_timeout(300)
     await page.fill("input[name='password']", SITE_PASSWORD)
+    await page.wait_for_timeout(300)
     await page.click("button[type='submit']")
-    await page.wait_for_url(f"{SITE_URL}/**", timeout=20000)
-    await page.wait_for_timeout(2000)
+    await page.wait_for_url(f"{SITE_URL}/**", timeout=30000)
+    await page.wait_for_timeout(3000)
     logging.info(f"Залогинился. URL: {page.url}")
 
 async def ensure_logged_in(page):
     """Проверяет авторизацию и дожидается загрузки страницы"""
-    await page.goto(f"{SITE_URL}/domains", timeout=40000, wait_until="networkidle")
-    await page.wait_for_timeout(4000)  # Увеличено время для загрузки React
-    
+    await page.goto(f"{SITE_URL}/domains", timeout=60000, wait_until="networkidle")
+    await page.wait_for_timeout(6000)
+
     if "/auth/login" in page.url or "/login" in page.url:
         logging.info("Сессия истекла, логинюсь заново...")
         await site_login(page)
-        await page.goto(f"{SITE_URL}/domains", timeout=40000, wait_until="networkidle")
-        await page.wait_for_timeout(4000)
-    
+        await page.goto(f"{SITE_URL}/domains", timeout=60000, wait_until="networkidle")
+        await page.wait_for_timeout(6000)
+
     logging.info(f"ensure_logged_in: {page.url}")
-    
-    # Дополнительная проверка что страница действительно загрузилась
+
     try:
-        await page.wait_for_load_state("domcontentloaded", timeout=5000)
-        await page.wait_for_load_state("networkidle", timeout=10000)
+        await page.wait_for_load_state("domcontentloaded", timeout=10000)
+        await page.wait_for_load_state("networkidle", timeout=15000)
     except Exception as e:
         logging.warning(f"Ожидание загрузки страницы: {e}")
 
 async def _open_invoice_form(page, domain_name: str = None) -> bool:
     logging.info(f"_open_invoice_form: URL={page.url}, domain={domain_name}")
-    
-    # Увеличенное время ожидания для хостинга
+
     try:
-        await page.wait_for_selector('[data-slot="dropdown-menu-trigger"]', timeout=20000)
+        await page.wait_for_selector('[data-slot="dropdown-menu-trigger"]', timeout=40000)
         logging.info("Кнопки меню найдены")
     except Exception as e:
         logging.error(f"Кнопки меню не появились: {e}")
-        # Сохраняем скриншот для диагностики
         try:
             await page.screenshot(path="debug_no_menu.png")
             logging.info("Скриншот сохранён: debug_no_menu.png")
         except Exception:
             pass
         return False
-    
+
     await page.wait_for_timeout(500)
     triggers = await page.query_selector_all('[data-slot="dropdown-menu-trigger"]')
     logging.info(f"Всего триггеров: {len(triggers)}")
-    
+
     SKIP_KEYWORDS = ["ID:", SITE_LOGIN, "horunochka", "Open user menu", "avatar"]
 
     async def is_profile_trigger(t) -> bool:
