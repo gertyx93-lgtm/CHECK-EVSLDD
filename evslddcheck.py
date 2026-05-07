@@ -416,13 +416,16 @@ async def get_domain_id() -> int | None:
             logging.info(f"Домены: {data}")
             if data.get("success") and data.get("data"):
                 domains = data["data"]
-                if isinstance(domains, list) and len(domains) > 0:
-                    _api_domain_id = domains[0]["id"]
-                    logging.info(f"Используем domain_id: {_api_domain_id}")
-                    return _api_domain_id
-                elif isinstance(domains, dict):
-                    _api_domain_id = domains.get("id")
-                    return _api_domain_id
+                if isinstance(domains, list):
+                    # Ищем домен с is_invoice: true
+                    invoice_domain = next(
+                        (d for d in domains if d.get("is_invoice") is True),
+                        None
+                    )
+                    if invoice_domain:
+                        _api_domain_id = invoice_domain["id"]
+                        logging.info(f"Используем invoice domain_id: {_api_domain_id}")
+                        return _api_domain_id
     except Exception as e:
         logging.error(f"get_domain_id ошибка: {e}")
     return None
